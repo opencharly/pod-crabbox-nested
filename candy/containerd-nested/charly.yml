@@ -27,7 +27,10 @@ containerd-nested:
             The inner containerd/krun stack for a nested Crabbox lease. Installs the
             pinned `nerdctl-full` release into `/usr/local` (nerdctl + containerd +
             buildkit + the CNI plugins) with the pinned-release `download:` verb,
-            enables
+            writes the inner `/etc/containerd/config.toml` (schema `version = 3`,
+            the one the shipped containerd reports) whose `imports` merges
+            `/etc/containerd/conf.d/*.toml`, so a downstream image's drop-in takes
+            effect, enables
             `containerd.service`, and resets its start-limit counter before every
             start (`ExecStartPre=-systemctl reset-failed containerd.service`). Adds
             the Arch `crun` and `krun` OCI runtimes with `libkrun`/`libkrunfw` on the
@@ -77,6 +80,34 @@ containerd-nested:
               extract: tar.gz
               to: /usr/local
               run_as: root
+            - run: create the inner containerd configuration directory
+              mkdir: /etc/containerd
+              run_as: root
+              mode: "0755"
+            - run: write the inner containerd config that imports the conf.d drop-ins
+              id: nested-containerd-config
+              write: /etc/containerd/config.toml
+              run_as: root
+              mode: "0644"
+              content: |
+                # Managed by the opencharly pod-crabbox-nested candy.
+                #
+                # The shipped containerd (nerdctl-full's, at
+                # /usr/local/lib/systemd/system/containerd.service) starts with no
+                # --config flag, so it reads this default path. Its built-in
+                # defaults have an EMPTY imports list, which makes every
+                # /etc/containerd/conf.d/*.toml drop-in inert; this file is what
+                # makes a downstream image's drop-in (the k3s CNI directories, a
+                # GPU runtime handler) part of the effective config.
+                #
+                # `version = 3` is the schema the pinned containerd v2.1.1 itself
+                # emits from `containerd config default`. The schema version is
+                # checked against that command below, so a nerdctl-full bump that
+                # changes it fails the build's own check instead of silently
+                # ignoring plugin settings. A version the binary does not know is
+                # a hard error (a v4 config panics v2.1.1), never a warning.
+                version = 3
+                imports = ["/etc/containerd/conf.d/*.toml"]
             - run: create the nerdctl configuration directory
               mkdir: /etc/nerdctl
               run_as: root
@@ -197,6 +228,29 @@ containerd-nested:
               id: nested-containerd-reset-failed
               exit_status: 0
               command: grep -qx 'ExecStartPre=-/usr/bin/systemctl reset-failed containerd.service' /etc/systemd/system/containerd.service.d/reset-failed.conf
+            - check: the inner containerd config carries the shipped binary's schema version
+              id: nested-containerd-config-version
+              exit_status: 0
+              command: >-
+                  grep -qx 'version = 3' /etc/containerd/config.toml &&
+                  test "$(/usr/local/bin/containerd config default | head -n 1)" = 'version = 3'
+            - check: the inner containerd imports a conf.d drop-in into its effective config
+              id: nested-containerd-imports
+              exit_status: 0
+              command: |
+                  set -eu
+                  main=/etc/containerd/config.toml
+                  probe=/etc/containerd/conf.d/99-charly-import-probe.toml
+                  trap 'rm -f "$probe"' EXIT
+                  grep -Fqx 'imports = ["/etc/containerd/conf.d/*.toml"]' "$main"
+                  mkdir -p /etc/containerd/conf.d
+                  printf '%s\n' \
+                    "[plugins.'io.containerd.cri.v1.runtime'.cni]" \
+                    "  bin_dirs = ['/tmp/charly-import-probe-bin']" \
+                    "  conf_dir = '/tmp/charly-import-probe-conf'" > "$probe"
+                  effective=$(/usr/local/bin/containerd config dump)
+                  printf '%s\n' "$effective" | grep -Fq "bin_dirs = ['/tmp/charly-import-probe-bin']"
+                  printf '%s\n' "$effective" | grep -Fq "conf_dir = '/tmp/charly-import-probe-conf'"
             - check: libkrun.so.1 is on the dynamic loader path
               id: nested-libkrun-loader-path
               exit_status: 0
