@@ -152,7 +152,13 @@ check-pod-crabbox-nested-engine:
                       rm -rf /run/containerd /var/lib/containerd
                       rm -f /etc/containerd/conf.d/99-charly-nested-bed-probe.toml
                       rm -f /crabbox/authorized_keys /crabbox/lease.env /crabbox/bootstrap.sh
-                      rm -rf /home/crabbox/.ssh
+                      # The contract user's home is the passwd entry's field, never a
+                      # hardcoded /home/crabbox: this base adopts uid 1000 from the
+                      # distro image (measured: crabbox's home is /home/user), so a
+                      # hardcoded path would make the absence probe vacuous.
+                      home="$(getent passwd crabbox | cut -d: -f6)"
+                      test -n "$home" || { echo "FAIL: the lease user crabbox has no passwd home" >&2; exit 1; }
+                      rm -rf "$home/.ssh"
                       rm -f /var/lib/crabbox/bootstrapped /var/lib/crabbox/lease.env /var/lib/crabbox/bootstrap-marker
                       rm -f /tmp/crabbox-lease-key /tmp/crabbox-lease-key.pub
                       ssh-keygen -q -t ed25519 -N '' -f /tmp/crabbox-lease-key
@@ -191,7 +197,7 @@ check-pod-crabbox-nested-engine:
                           exit 1
                           ;;
                       esac
-                      test ! -e /home/crabbox/.ssh/authorized_keys
+                      test ! -e "$home/.ssh/authorized_keys"
                       echo "ABSENT: the inner engine is not serving and the lease refuses the key"
                   in_container: true
             - check: perform — the lease unit consumes the inputs and containerd.service starts the inner engine
