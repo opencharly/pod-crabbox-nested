@@ -26,7 +26,7 @@ containerd-nested:
         description: |
             The inner containerd/krun stack for a nested Crabbox lease. Installs the
             pinned `nerdctl-full` release into `/usr/local` (nerdctl + containerd +
-            buildkit + the CNI plugins) with the content-addressed `download:` verb,
+            buildkit + the CNI plugins) with the pinned-release `download:` verb,
             enables
             `containerd.service`, and resets its start-limit counter before every
             start (`ExecStartPre=-systemctl reset-failed containerd.service`). Adds

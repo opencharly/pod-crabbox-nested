@@ -34,8 +34,8 @@ This variant adds the inner engine:
 
 The nerdctl-full archive is fetched from the release URL pinned by the
 `NERDCTL_FULL_VERSION` var in `candy/containerd-nested/charly.yml` with charly's
-content-addressed `download:` verb, and the installed `nerdctl` must report that
-version in the build check.
+`download:` verb, and the installed `nerdctl` must report that version in the
+build check.
 
 ## Not provided
 

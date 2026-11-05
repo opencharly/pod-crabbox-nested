@@ -1,7 +1,9 @@
 # Image build/publish for this repo — the thin caller for the org's ONE reusable
 # (opencharly/.github/.github/workflows/image-build.yml, landed by opencharly/.github#275).
 #
-# THE REF IS THE REUSABLE'S MERGED `main` (`d5fb8ac1ab20`, tag `v2026.307.0153`).
+# THE REF IS THE REUSABLE'S MERGED `main` (`bd1e195cadfce40e09719d99a16f7353e1aa27bd`),
+# pinned by commit so a later `main` cannot change what this repo builds with. That is the
+# revision this repo's first `pull_request` run used (measured 2026-11-05).
 #
 # WHY THIS TRIGGERS ON `workflow_run`, NOT `push: tags`. It used to listen on
 # `push: tags: ['v*']` and it NEVER FIRED: `pod-crabbox` merged and tagged
@@ -61,7 +63,7 @@ jobs:
   image:
     needs: tag
     if: github.event_name != 'workflow_run' || needs.tag.outputs.tag != ''
-    uses: opencharly/.github/.github/workflows/image-build.yml@main
+    uses: opencharly/.github/.github/workflows/image-build.yml@bd1e195cadfce40e09719d99a16f7353e1aa27bd
     with:
       tag: ${{ needs.tag.outputs.tag }}
       push: ${{ github.event_name == 'workflow_run' }}
