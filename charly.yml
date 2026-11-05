@@ -115,13 +115,17 @@ check-pod-crabbox-nested-engine:
             bootstrap.sh, and the image's own containerd.service starts the
             inner daemon with a conf.d drop-in in place), and PRESENCE (the
             daemon answers with a server UUID, the drop-in is effective in the
-            RUNNING daemon, `/etc/machine-id` is this lease's own, and the lease
-            holds over SSH as `crabbox` on 2222 with passwordless sudo and
+            RUNNING daemon, `/etc/machine-id` is POPULATED by this boot, and the
+            lease holds over SSH as `crabbox` on 2222 with passwordless sudo and
             `/usr/local/libexec/crabbox/ready` exiting 0). A missing unit, a
-            daemon that does not start, an unmerged drop-in, a baked and shared
-            machine id, a missing listener, login user, sudo grant or
-            readiness hook fails the bed; a venue that is not answering fails
-            the absence step instead of reading as "nothing applied yet". The
+            daemon that does not start, an unmerged drop-in, an unpopulated
+            machine-id, a missing listener, login user, sudo grant or readiness
+            hook fails the bed; a venue that is not answering fails the absence
+            step instead of reading as "nothing applied yet". This bed proves the
+            id is POPULATED, not that it is unique to this lease: a baked id would
+            also be non-empty. Per-clone uniqueness is guaranteed by the
+            build-scope `nested-machine-id-clone-identity` check, which asserts the
+            shipped file is EMPTY so every clone generates its own. The
             Docker-compatible socket (issue #1) and the containerd LEASE venue
             are explicitly not claimed.
         volume:
@@ -228,7 +232,7 @@ check-pod-crabbox-nested-engine:
                       systemctl is-active --quiet containerd.service
                       echo "PERFORMED: the lease unit applied the inputs and containerd.service started the inner engine"
                   in_container: true
-            - check: presence — the inner containerd answers, the drop-in is effective, the clone identity is this lease's own, and the lease holds over SSH
+            - check: presence — the inner containerd answers, the drop-in is effective in the running daemon, /etc/machine-id is populated by this boot, and the lease holds over SSH
               id: nested-engine-present-and-lease-holds
               context:
                 - runtime
@@ -244,10 +248,13 @@ check-pod-crabbox-nested-engine:
                       systemctl is-active --quiet sshd.service
                       systemctl is-active --quiet crabbox-bootstrap.service
                       systemctl is-active --quiet containerd.service
-                      # The clone-identity mechanism at RUNTIME: the image ships an
-                      # EMPTY /etc/machine-id (a build-scope claim), so systemd
-                      # generates this lease's OWN id on first boot. An image that
-                      # baked an id and shared it across clones fails here.
+                      # The machine-id at RUNTIME is POPULATED: systemd has generated
+                      # an id for this boot. This does NOT prove uniqueness — a baked
+                      # id is non-empty too, so a baked-and-shared image would pass
+                      # this line. Per-clone uniqueness is guaranteed by the
+                      # build-scope `nested-machine-id-clone-identity` check, which
+                      # asserts the SHIPPED file is empty; this line only proves the
+                      # lease actually booted systemd and wrote an id.
                       test -s /etc/machine-id
                       # The start-limit drop-in is part of the RUNNING unit's effective
                       # configuration, not merely a file on disk.
@@ -289,5 +296,5 @@ check-pod-crabbox-nested-engine:
                       test -f /var/lib/crabbox/bootstrapped
                       marker=$(tr -d '\n' < /var/lib/crabbox/bootstrap-marker)
                       test "$marker" = charly-pod-crabbox-nested-bed
-                      echo "PRESENT: inner containerd answers (server UUID above), the conf.d drop-in is effective in the running daemon, /etc/machine-id is this lease's own, and the lease holds over SSH"
+                      echo "PRESENT: inner containerd answers (server UUID above), the conf.d drop-in is effective in the running daemon, /etc/machine-id is populated by this boot (uniqueness is the build-scope check's claim), and the lease holds over SSH"
                   in_container: true
