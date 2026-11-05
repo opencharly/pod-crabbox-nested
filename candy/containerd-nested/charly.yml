@@ -1,0 +1,274 @@
+# containerd-nested — the inner containerd/krun stack added by
+# `pod-crabbox-nested` on top of the `pod-crabbox-systemd` lease contract.
+#
+# Sources:
+#   - CONTAINERD-IMAGES.md §2, the `pod-crabbox-nested` row: the contents and the
+#     requirements this candy implements.
+#   - CONTAINERD.md §9.2–§9.4: the inner engine, the krun library on the loader
+#     path, and the `bridge_ip` override.
+#   - CONTAINERD-IMAGES.md §3.3: `systemctl reset-failed containerd` before a
+#     start, so the inner engine never starts rate-limited.
+#   - The Arch package index: the package names below (`krun` is Arch's crun-based
+#     libkrun runtime and depends on `crun` + `libkrun`; `iptables-nft` is provided
+#     by the base image's `iptables` package).
+#   - `opencharly/layer-nerdctl` for the pinned nerdctl-full version, and
+#     `opencharly/pod-crabbox-code` for the pinned-release `download:` install
+#     pattern this candy reuses on the CachyOS base.
+#
+# Not implemented, and named in the repo's PR body rather than guessed: the
+# `pod-crabbox-nested` row's "docker-compatible socket for the Actions runner".
+# No package in the row's list provides a Docker API daemon, and the only docker
+# socket the org documents is the crabbox local-container provider's HOST socket
+# pass-through (`--local-container-docker-socket`, mounted at `/var/run/docker.sock`),
+# which is a consumer action rather than an image artifact.
+containerd-nested:
+    candy:
+        description: |
+            The inner containerd/krun stack for a nested Crabbox lease. Installs the
+            pinned `nerdctl-full` release into `/usr/local` (nerdctl + containerd +
+            buildkit + the CNI plugins) with the content-addressed `download:` verb,
+            enables
+            `containerd.service`, and resets its start-limit counter before every
+            start (`ExecStartPre=-systemctl reset-failed containerd.service`). Adds
+            the Arch `crun` and `krun` OCI runtimes with `libkrun`/`libkrunfw` on the
+            dynamic loader path, `virglrenderer`, and asserts the `libbz2.so.1.0`
+            soname libkrun requests. Writes `/etc/nerdctl/nerdctl.toml` with
+            `bridge_ip = "10.99.0.1/24"`, empties `/etc/machine-id`, sets
+            `MACAddressPolicy=none` in `/etc/systemd/network/99-default.link`, masks
+            `systemd-udevd` and the `sys-kernel-{config,debug,tracing}.mount` units,
+            and asserts `rtkit` is absent.
+        var:
+            # The pinned nerdctl-full release, from opencharly/layer-nerdctl's own
+            # pin. The release tarball carries nerdctl, containerd, buildkit and the
+            # CNI plugins in one archive.
+            NERDCTL_FULL_VERSION: "2.1.2"
+        # The lease SSH port is the base image's own contract. An OCI base does not
+        # carry its candy chain's ports across the boundary, so the published number
+        # is restated here (one number, taken from the base image's label).
+        port:
+            - 2222
+        distro:
+            arch:
+                package:
+                    # CONTAINERD.md §9.2: the nested OCI runtime. Arch's `krun`
+                    # package is the crun-based runtime using libkrun and depends on
+                    # `crun` + `libkrun`; the `crun` package is named explicitly so
+                    # the runtime the row asks for is readable on its own.
+                    - crun
+                    - krun
+                    # CONTAINERD.md §9.4: libkrun.so.1 (and libkrunfw beside it)
+                    # must be findable by the dynamic loader. Arch installs both
+                    # under /usr/lib, which is on the loader path.
+                    - libkrun
+                    - libkrunfw
+                    # CONTAINERD-IMAGES.md §2: the guest GPU/Vulkan renderer and the
+                    # bzip2 soname libkrun requests. Arch's `bzip2` package (already
+                    # in the base image) ships /usr/lib/libbz2.so.1.0 as a symlink,
+                    # so the plan's link is satisfied by the base and asserted below
+                    # instead of being re-created over a package-owned file.
+                    - virglrenderer
+        plan:
+            # ------------------------------------------------------------------
+            # The inner engine: pinned nerdctl-full, unpacked into /usr/local.
+            # ------------------------------------------------------------------
+            - run: install the pinned nerdctl-full release into /usr/local
+              id: nerdctl-full
+              download: "https://github.com/containerd/nerdctl/releases/download/v${NERDCTL_FULL_VERSION}/nerdctl-full-${NERDCTL_FULL_VERSION}-linux-amd64.tar.gz"
+              extract: tar.gz
+              to: /usr/local
+              run_as: root
+            - run: create the nerdctl configuration directory
+              mkdir: /etc/nerdctl
+              run_as: root
+              mode: "0755"
+            - run: write the nerdctl config with the non-colliding inner bridge subnet
+              write: /etc/nerdctl/nerdctl.toml
+              run_as: root
+              mode: "0644"
+              content: |
+                # Managed by the opencharly pod-crabbox-nested candy.
+                #
+                # A fresh inner bridge network defaults to 10.4.0.0/24, which
+                # collides with the outer lease's network; CONTAINERD.md §9.4
+                # measured the failure ("subnet 10.4.0.0/24 overlaps with other one
+                # on this address space") and this is the override it prescribes.
+                bridge_ip = "10.99.0.1/24"
+            # ------------------------------------------------------------------
+            # containerd.service: enabled, and never left holding a start-limit.
+            # ------------------------------------------------------------------
+            - run: create the multi-user wants directory
+              mkdir: /etc/systemd/system/multi-user.target.wants
+              run_as: root
+              mode: "0755"
+            - run: enable the nerdctl-full containerd.service at boot
+              link: /etc/systemd/system/multi-user.target.wants/containerd.service
+              target: /usr/local/lib/systemd/system/containerd.service
+              run_as: root
+            - run: create the containerd.service drop-in directory
+              mkdir: /etc/systemd/system/containerd.service.d
+              run_as: root
+              mode: "0755"
+            - run: reset containerd's start-limit counter before every start
+              write: /etc/systemd/system/containerd.service.d/reset-failed.conf
+              run_as: root
+              mode: "0644"
+              content: |
+                # Managed by the opencharly pod-crabbox-nested candy.
+                #
+                # CONTAINERD-IMAGES.md §3.3: five rapid starts hit StartLimitBurst=5
+                # and every later start is refused, so the counter is reset before
+                # each start. The `-` prefix is systemd's own "ignore this command's
+                # failure": a reset before the unit has ever failed is a no-op, not a
+                # swallowed error.
+                [Service]
+                ExecStartPre=-/usr/bin/systemctl reset-failed containerd.service
+            # ------------------------------------------------------------------
+            # Clone identity: an empty machine-id and no MAC policy.
+            # ------------------------------------------------------------------
+            - run: empty /etc/machine-id so a clone does not share a machine identity
+              copy: machine-id
+              to: /etc/machine-id
+              mode: "0644"
+              run_as: root
+            - run: create the systemd network directory
+              mkdir: /etc/systemd/network
+              run_as: root
+              mode: "0755"
+            - run: disable the udev MAC address policy
+              write: /etc/systemd/network/99-default.link
+              run_as: root
+              mode: "0644"
+              content: |
+                # Managed by the opencharly pod-crabbox-nested candy.
+                #
+                # CONTAINERD-IMAGES.md §2: without MACAddressPolicy=none every lease
+                # cloned from this image gets the same MAC and traffic reaches the
+                # wrong lease.
+                [Match]
+                OriginalName=*
+
+                [Link]
+                MACAddressPolicy=none
+            # ------------------------------------------------------------------
+            # Device and kernel-filesystem boundaries for a privileged lease.
+            # ------------------------------------------------------------------
+            - run: mask systemd-udevd, which in a privileged lease acts on host devices
+              link: /etc/systemd/system/systemd-udevd.service
+              target: /dev/null
+              run_as: root
+            - run: mask sys-kernel-config.mount for a rootless outer
+              link: /etc/systemd/system/sys-kernel-config.mount
+              target: /dev/null
+              run_as: root
+            - run: mask sys-kernel-debug.mount for a rootless outer
+              link: /etc/systemd/system/sys-kernel-debug.mount
+              target: /dev/null
+              run_as: root
+            - run: mask sys-kernel-tracing.mount for a rootless outer
+              link: /etc/systemd/system/sys-kernel-tracing.mount
+              target: /dev/null
+              run_as: root
+            # ------------------------------------------------------------------
+            # The inner engine's own surface.
+            # ------------------------------------------------------------------
+            - check: containerd from the pinned nerdctl-full release is installed and reports a version
+              id: nested-containerd-binary
+              exit_status: 0
+              command: >-
+                  test -x /usr/local/bin/containerd &&
+                  /usr/local/bin/containerd --version
+            - check: nerdctl from the pinned release reports the pinned version
+              id: nested-nerdctl-version
+              exit_status: 0
+              stdout:
+                  - contains: "2.1.2"
+              command: /usr/local/bin/nerdctl --version
+            - check: the nerdctl config declares the non-colliding bridge subnet
+              id: nested-bridge-ip
+              exit_status: 0
+              command: grep -qx 'bridge_ip = "10.99.0.1/24"' /etc/nerdctl/nerdctl.toml
+            - check: containerd.service is enabled at boot and comes from the nerdctl-full unit
+              id: nested-containerd-enabled
+              exit_status: 0
+              command: >-
+                  test -f /usr/local/lib/systemd/system/containerd.service &&
+                  test "$(readlink /etc/systemd/system/multi-user.target.wants/containerd.service)" = /usr/local/lib/systemd/system/containerd.service
+            - check: containerd resets its start-limit counter before every start
+              id: nested-containerd-reset-failed
+              exit_status: 0
+              command: grep -qx 'ExecStartPre=-/usr/bin/systemctl reset-failed containerd.service' /etc/systemd/system/containerd.service.d/reset-failed.conf
+            - check: libkrun.so.1 is on the dynamic loader path
+              id: nested-libkrun-loader-path
+              exit_status: 0
+              command: ldconfig -p | grep -q 'libkrun.so.1'
+            - check: the krun OCI runtime is installed
+              id: nested-krun-binary
+              exit_status: 0
+              command: command -v krun
+            - check: the crun OCI runtime is installed
+              id: nested-crun-binary
+              exit_status: 0
+              command: command -v crun
+            - check: iptables-nft and iproute2 are available to the inner engine
+              id: nested-iptables-iproute
+              exit_status: 0
+              command: >-
+                  command -v iptables-nft &&
+                  command -v ip
+            - check: virglrenderer is installed
+              id: nested-virglrenderer
+              exit_status: 0
+              command: pacman -Q virglrenderer
+            - check: the libbz2.so.1.0 soname libkrun requests resolves
+              id: nested-libbz2
+              exit_status: 0
+              command: test -e /usr/lib/libbz2.so.1.0
+            - check: /etc/machine-id exists and is empty
+              id: nested-machine-id-empty
+              exit_status: 0
+              command: test -f /etc/machine-id && test ! -s /etc/machine-id
+            - check: the network link drop-in sets MACAddressPolicy=none
+              id: nested-mac-address-policy
+              exit_status: 0
+              command: grep -qx 'MACAddressPolicy=none' /etc/systemd/network/99-default.link
+            - check: systemd-udevd is masked
+              id: nested-udevd-masked
+              exit_status: 0
+              command: test "$(readlink /etc/systemd/system/systemd-udevd.service)" = /dev/null
+            - check: the sys-kernel config, debug and tracing mounts are masked
+              id: nested-sys-kernel-mounts-masked
+              exit_status: 0
+              command: |
+                  for u in sys-kernel-config.mount sys-kernel-debug.mount sys-kernel-tracing.mount; do
+                    [ "$(readlink "/etc/systemd/system/$u")" = /dev/null ] || exit 1
+                  done
+            - check: rtkit is not installed
+              id: nested-no-rtkit
+              exit_status: 0
+              command: sh -c '! pacman -Q rtkit'
+            # ------------------------------------------------------------------
+            # The inherited lease contract, probed at THIS image's boundary.
+            # ------------------------------------------------------------------
+            - check: /sbin/init resolves to the systemd binary, so the image can boot systemd as PID 1
+              id: nested-systemd-init-binary
+              exit_status: 0
+              command: >-
+                  test "$(readlink -f /sbin/init)" = /usr/lib/systemd/systemd
+            - check: the inherited lease SSH contract is present (sshd, bootstrap, readiness hook)
+              id: nested-lease-binaries
+              exit_status: 0
+              command: >-
+                  test -x /usr/sbin/sshd &&
+                  test -x /usr/local/libexec/crabbox/bootstrap.sh &&
+                  test -x /usr/local/libexec/crabbox/ready
+            - check: the inherited lease login user is crabbox at uid 1000
+              id: nested-lease-user
+              exit_status: 0
+              command: >-
+                  test "$(getent passwd 1000 | cut -d: -f1)" = crabbox
+            - check: the inherited SSH drop-in names port 2222 and sshd parses it
+              id: nested-lease-sshd
+              exit_status: 0
+              command: >-
+                  grep -qx 'Port 2222' /etc/ssh/sshd_config.d/99-crabbox.conf &&
+                  /usr/sbin/sshd -t

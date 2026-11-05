@@ -1,0 +1,59 @@
+# pod-crabbox-nested — the nested-engine CachyOS lease image for the Crabbox
+# containerd provider.
+#
+# One repo per image (W5.2). The image imports the systemd lease image at a
+# PINNED tag, so the image tag and the git tag name the same build:
+# ghcr.io/opencharly/pod-crabbox-nested:<tag> is the tree tagged <tag>.
+repo: github.com/opencharly/pod-crabbox-nested
+defaults:
+    platform:
+        - linux/amd64
+    tag: auto
+    registry: ghcr.io/opencharly
+    build:
+        - pac
+import: []
+discover:
+    - path: candy
+      recursive: true
+
+# The nested variant. Everything about the lease contract (sshd on 2222, the
+# `crabbox` login user with passwordless sudo, the read-only `/crabbox` inputs,
+# the shared bootstrap, the readiness hook) and systemd-as-PID-1 are inherited
+# from `pod-crabbox-systemd`; this image adds the inner containerd/krun stack.
+pod-crabbox-nested:
+    candy:
+        description: |
+            The nested-engine CachyOS lease image for a Crabbox `containerd` lease:
+            the systemd-init `pod-crabbox-systemd` contract plus an inner containerd
+            (the pinned `nerdctl-full` release unpacked into `/usr/local`, with
+            `containerd.service` enabled and `systemctl reset-failed containerd`
+            before every start), the `crun`/`krun` OCI runtimes with `libkrun` and
+            `libkrunfw` on the dynamic loader path, `virglrenderer`, and the
+            `libbz2.so.1.0` soname libkrun requests. The inner nerdctl gets a
+            bridge subnet that cannot collide with the outer lease's
+            (`bridge_ip = "10.99.0.1/24"`). The image empties `/etc/machine-id` and
+            sets `MACAddressPolicy=none` (otherwise every lease cloned from it
+            shares a MAC), masks `systemd-udevd` (udev in a privileged lease acts on
+            host devices), keeps `rtkit` out, and masks `sys-kernel-config.mount`,
+            `sys-kernel-debug.mount` and `sys-kernel-tracing.mount` for a rootless
+            outer. It runs as a pod (nested) and as a krun VM; the outer runtime
+            supplies `/dev/kvm` and the `--device` flags.
+        base: ghcr.io/opencharly/pod-crabbox-systemd:2026.308.2335
+        # An OCI base does not inherit the parent's distro/build values, so the
+        # CachyOS chain is declared here; the base image is itself CachyOS.
+        distro:
+            - cachyos
+            - arch
+        # systemd refuses to run in system mode as a non-root PID 1, so the image
+        # ends at USER root exactly as the base image does; the LOGIN user stays
+        # `crabbox` (uid 1000), created by the inherited candy.
+        user: root
+        uid: 0
+        gid: 0
+        # systemd as PID 1, inherited from the systemd variant: crun/runc
+        # `--systemd=always`, krun `KRUN_INIT_PID1=1`.
+        entrypoint:
+            - /sbin/init
+        candy:
+            - containerd-nested
