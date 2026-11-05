@@ -26,9 +26,11 @@ pod-crabbox-nested:
         description: |
             The nested-engine CachyOS lease image for a Crabbox `containerd` lease:
             the systemd-init `pod-crabbox-systemd` contract plus an inner containerd
-            (the pinned `nerdctl-full` release unpacked into `/usr/local`, with
-            `containerd.service` enabled and `systemctl reset-failed containerd`
-            before every start), the `crun`/`krun` OCI runtimes with `libkrun` and
+            (the pinned `nerdctl-full` release unpacked into `/usr/local`, an
+            `/etc/containerd/config.toml` whose `imports` merges
+            `/etc/containerd/conf.d/*.toml` drop-ins, with `containerd.service`
+            enabled and `systemctl reset-failed containerd` before every start),
+            the `crun`/`krun` OCI runtimes with `libkrun` and
             `libkrunfw` on the dynamic loader path, `virglrenderer`, and the
             `libbz2.so.1.0` soname libkrun requests. The inner nerdctl gets a
             bridge subnet that cannot collide with the outer lease's
