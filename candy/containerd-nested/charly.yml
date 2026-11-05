@@ -277,10 +277,29 @@ containerd-nested:
               id: nested-libbz2
               exit_status: 0
               command: test -e /usr/lib/libbz2.so.1.0
-            - check: /etc/machine-id exists and is empty
-              id: nested-machine-id-empty
+            # The clone-identity contract holds at BOTH boundaries, so the check
+            # must be true in both: the image SHIPS an empty /etc/machine-id, and a
+            # booted lease has systemd's own generated id there. Asserting only the
+            # empty file would be false in the deploy context (systemd fills it at
+            # first boot); asserting only the generated id would be false in the
+            # build context. This is the discriminator between the two.
+            - check: /etc/machine-id carries the clone-identity contract in this context
+              id: nested-machine-id-clone-identity
               exit_status: 0
-              command: test -f /etc/machine-id && test ! -s /etc/machine-id
+              command: |
+                  set -eu
+                  if [ "$(ps -p 1 -o comm=)" = systemd ]; then
+                    # Deploy context: systemd has booted and generated THIS lease's
+                    # id. An image that baked and shared an id would still pass this
+                    # in one lease, which is why the build half below matters.
+                    test -s /etc/machine-id
+                    grep -Eq '^[0-9a-f]{32}$' /etc/machine-id
+                  else
+                    # Build context: the file exists and is empty, so every clone
+                    # generates its own id instead of sharing the image's.
+                    test -f /etc/machine-id
+                    test ! -s /etc/machine-id
+                  fi
             - check: the network link drop-in sets MACAddressPolicy=none
               id: nested-mac-address-policy
               exit_status: 0

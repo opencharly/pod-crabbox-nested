@@ -59,3 +59,235 @@ pod-crabbox-nested:
             - /sbin/init
         candy:
             - containerd-nested
+
+# =============================================================================
+# check-pod-crabbox-nested-engine — the disposable R10 bed for the nested-engine
+# lease image.
+#
+# The image's own `check:` steps are BUILD-scope: they assert the binaries, the
+# `/etc/containerd/config.toml` import line, the bridge override and the masked
+# units on the built artifact. A build container never starts the inner daemon,
+# so none of them can prove the thing this image exists for: the inner
+# containerd runs inside a lease. This bed does, because the deploy boots the
+# image and the bed drives the running system.
+#
+# The venue is a disposable pod built from the image under review; its container
+# and its input volume are torn down with it.
+#
+# This bed deliberately does NOT claim the containerd substrate: in the pinned
+# toolchain a `pod:` deploy's authored `engine:` selector is dropped by the
+# check-bed `config`/`start` path (`charly config` emits a podman quadlet) and
+# `charly deploy add --engine` is an unknown flag (opencharly/charly#1109).
+# What this bed proves is this image's own, engine-independent running contract
+# on a disposable pod — the same scope its two sibling beds claim.
+#
+# Three steps, in the order that makes the bed a gate rather than a snapshot:
+#   1. ABSENCE  — reset the state, then prove the inner engine is NOT serving
+#                 (the unit is inactive, no containerd process, no socket, and
+#                 the pinned nerdctl client cannot reach a daemon) while the
+#                 lease still REFUSES the freshly generated key. The instruments
+#                 are asserted to exist first, so their silence is a measurement.
+#   2. PERFORM  — write the read-only lease inputs temp + mv and restart the
+#                 image's own `crabbox-bootstrap.service`; write a `conf.d`
+#                 drop-in and start `containerd.service` through the image's own
+#                 unit (Type=notify, so start returns when the daemon is ready).
+#   3. PRESENCE — the inner daemon answers as a running daemon (`ctr version`
+#                 server UUID, `nerdctl -n default info` exit 0), the drop-in is
+#                 effective in the RUNNING daemon (a disabled leaf plugin is
+#                 absent while a control plugin is present), and the lease
+#                 contract still holds over SSH as `crabbox` on 2222:
+#                 passwordless sudo and `/usr/local/libexec/crabbox/ready` exit 0.
+#
+# The plan runs at every check-live pass, including the fresh-rebuild pass, so
+# step 1 resets and step 2 re-applies: each pass measures its OWN perform.
+# =============================================================================
+check-pod-crabbox-nested-engine:
+    pod:
+        image: pod-crabbox-nested
+        disposable: true
+        lifecycle: test
+        description: >-
+            R10 witness for the pod-crabbox-nested lease image: a disposable
+            container built from the image boots systemd as PID 1, and the bed
+            drives the inner engine in three steps — ABSENCE (the inner
+            containerd is not serving and the lease refuses the key), PERFORM
+            (the lease unit consumes authorized_keys, lease.env and
+            bootstrap.sh, and the image's own containerd.service starts the
+            inner daemon with a conf.d drop-in in place), and PRESENCE (the
+            daemon answers with a server UUID, the drop-in is effective in the
+            RUNNING daemon, `/etc/machine-id` is this lease's own, and the lease
+            holds over SSH as `crabbox` on 2222 with passwordless sudo and
+            `/usr/local/libexec/crabbox/ready` exiting 0). A missing unit, a
+            daemon that does not start, an unmerged drop-in, a baked and shared
+            machine id, a missing listener, login user, sudo grant or
+            readiness hook fails the bed; a venue that is not answering fails
+            the absence step instead of reading as "nothing applied yet". The
+            Docker-compatible socket (issue #1) and the containerd LEASE venue
+            are explicitly not claimed.
+        volume:
+            - name: lease-inputs
+              type: volume
+              path: /crabbox
+        plan:
+            - check: absence — the inner engine is not serving and the lease refuses the freshly generated key
+              id: nested-engine-absent-before-perform
+              context:
+                - runtime
+              timeout: 180s
+              command:
+                  command: |
+                      set -euo pipefail
+                      # The instruments must exist before their silence means anything.
+                      test -x /usr/local/bin/nerdctl
+                      test -x /usr/local/bin/ctr
+                      # Reset whatever an earlier pass left behind: the plan runs at
+                      # every check-live pass, and after `charly update` the container
+                      # is rebuilt while the named input volume survives. The bed must
+                      # measure its OWN perform, never a leftover one.
+                      systemctl stop containerd.service
+                      rm -rf /run/containerd /var/lib/containerd
+                      rm -f /etc/containerd/conf.d/99-charly-nested-bed-probe.toml
+                      rm -f /crabbox/authorized_keys /crabbox/lease.env /crabbox/bootstrap.sh
+                      rm -rf /home/crabbox/.ssh
+                      rm -f /var/lib/crabbox/bootstrapped /var/lib/crabbox/lease.env /var/lib/crabbox/bootstrap-marker
+                      rm -f /tmp/crabbox-lease-key /tmp/crabbox-lease-key.pub
+                      ssh-keygen -q -t ed25519 -N '' -f /tmp/crabbox-lease-key
+                      # ABSENCE of the inner engine: its unit is inactive, no process
+                      # survives the reset, and the pinned client cannot reach a daemon.
+                      if systemctl is-active --quiet containerd.service; then
+                        echo "FAIL: containerd.service is still active before the perform" >&2
+                        exit 1
+                      fi
+                      if pgrep -x containerd >/dev/null; then
+                        echo "FAIL: a containerd process survives the reset" >&2
+                        exit 1
+                      fi
+                      test ! -S /run/containerd/containerd.sock
+                      if out=$(nerdctl -n default info 2>&1); then
+                        printf '%s\n' "$out" >&2
+                        echo "FAIL: the inner engine answered before the perform" >&2
+                        exit 1
+                      fi
+                      printf 'engine absent: %s\n' "$(printf '%s\n' "$out" | sed -n '1p')"
+                      # ABSENCE of the lease contract: no authorized_keys are applied
+                      # and the fresh key is refused by AUTHENTICATION. A venue that
+                      # does not answer fails this step instead of reading as "not
+                      # applied yet".
+                      systemctl start sshd.service
+                      systemctl is-active --quiet sshd.service
+                      out=$(ssh -p 2222 -i /tmp/crabbox-lease-key \
+                        -o BatchMode=yes -o StrictHostKeyChecking=no \
+                        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+                        crabbox@127.0.0.1 true 2>&1 || true)
+                      case "$out" in
+                        *"Permission denied (publickey"*) ;;
+                        *)
+                          printf '%s\n' "$out" >&2
+                          echo "FAIL: expected the lease to refuse the key over SSH; a venue that does not answer cannot prove the absence" >&2
+                          exit 1
+                          ;;
+                      esac
+                      test ! -e /home/crabbox/.ssh/authorized_keys
+                      echo "ABSENT: the inner engine is not serving and the lease refuses the key"
+                  in_container: true
+            - check: perform — the lease unit consumes the inputs and containerd.service starts the inner engine
+              id: nested-engine-performs-the-start
+              context:
+                - runtime
+              timeout: 240s
+              command:
+                  command: |
+                      set -euo pipefail
+                      install -d -m 0755 /crabbox
+                      # The consumer writes each input TEMP + mv; the bootstrap reads
+                      # each one ONCE. Write the same way, so the bed exercises the
+                      # contract's own input path rather than an in-place rewrite it
+                      # forbids.
+                      install -m 0644 /tmp/crabbox-lease-key.pub /crabbox/.authorized_keys.tmp
+                      printf 'crabbox_bed_nonce=%s\n' charly-pod-crabbox-nested-bed > /crabbox/.lease.env.tmp
+                      printf '#!/bin/bash\nset -euo pipefail\nprintf "%%s\\n" "$crabbox_bed_nonce" > /var/lib/crabbox/bootstrap-marker\n' > /crabbox/.bootstrap.sh.tmp
+                      chmod 0755 /crabbox/.bootstrap.sh.tmp
+                      mv /crabbox/.authorized_keys.tmp /crabbox/authorized_keys
+                      mv /crabbox/.lease.env.tmp /crabbox/lease.env
+                      mv /crabbox/.bootstrap.sh.tmp /crabbox/bootstrap.sh
+                      # The UNIT, not a hand-run copy of the script, consumes them.
+                      systemctl restart crabbox-bootstrap.service
+                      systemctl is-active --quiet crabbox-bootstrap.service
+                      test -f /var/lib/crabbox/bootstrapped
+                      # A conf.d drop-in the RUNNING daemon must merge. Disabling a
+                      # leaf gRPC service is visible through the containerd API, which
+                      # is the only place a running daemon's effective config is read —
+                      # a build-time `config dump` reads the files, not the daemon.
+                      install -d -m 0755 /etc/containerd/conf.d
+                      printf '%s\n' 'disabled_plugins = ["io.containerd.grpc.v1.healthcheck"]' \
+                        > /etc/containerd/conf.d/99-charly-nested-bed-probe.toml
+                      # The image's own unit starts the daemon (Type=notify, so start
+                      # returns once the daemon is ready) and its ExecStartPre resets
+                      # the start-limit counter. No sleep, no retry.
+                      systemctl start containerd.service
+                      systemctl is-active --quiet containerd.service
+                      echo "PERFORMED: the lease unit applied the inputs and containerd.service started the inner engine"
+                  in_container: true
+            - check: presence — the inner containerd answers, the drop-in is effective, the clone identity is this lease's own, and the lease holds over SSH
+              id: nested-engine-present-and-lease-holds
+              context:
+                - runtime
+              timeout: 240s
+              command:
+                  command: |
+                      set -euo pipefail
+                      # systemd-as-PID-1 and the units this image composes.
+                      test "$(ps -p 1 -o comm=)" = systemd
+                      systemctl is-enabled --quiet sshd.service
+                      systemctl is-enabled --quiet crabbox-bootstrap.service
+                      systemctl is-enabled --quiet containerd.service
+                      systemctl is-active --quiet sshd.service
+                      systemctl is-active --quiet crabbox-bootstrap.service
+                      systemctl is-active --quiet containerd.service
+                      # The clone-identity mechanism at RUNTIME: the image ships an
+                      # EMPTY /etc/machine-id (a build-scope claim), so systemd
+                      # generates this lease's OWN id on first boot. An image that
+                      # baked an id and shared it across clones fails here.
+                      test -s /etc/machine-id
+                      # The start-limit drop-in is part of the RUNNING unit's effective
+                      # configuration, not merely a file on disk.
+                      systemctl show containerd.service -p ExecStartPre --value | grep -q 'reset-failed containerd.service'
+                      test -S /run/containerd/containerd.sock
+                      # The daemon answers with a server identity: `ctr version` prints
+                      # the server block (and its UUID) ONLY when the daemon it dials
+                      # answers, and `set -e` fails this step when it does not.
+                      version=$(ctr version)
+                      uuid=$(printf '%s\n' "$version" | sed -n 's/^ *UUID: *//p' | tail -n 1)
+                      test -n "$uuid"
+                      printf 'inner containerd server UUID: %s\n' "$uuid"
+                      # The pinned nerdctl client reaches the same daemon. Its exit
+                      # status is the client's own; step 1 proved it is non-zero with
+                      # the daemon down, so it can go red here.
+                      nerdctl -n default info > /tmp/nerdctl-presence.out
+                      test -s /tmp/nerdctl-presence.out
+                      # The drop-in the perform step wrote is effective in the RUNNING
+                      # daemon: the disabled leaf plugin is absent while a control
+                      # plugin is present, so a daemon with an empty plugin table
+                      # cannot pass this by accident.
+                      plugins=$(ctr plugins ls)
+                      printf '%s\n' "$plugins" | awk '$1=="io.containerd.runtime.v2" && $2=="task"{found=1} END{exit !found}'
+                      if printf '%s\n' "$plugins" | awk '$1=="io.containerd.grpc.v1" && $2=="healthcheck"{found=1} END{exit !found}'; then
+                        echo "FAIL: the running daemon did not merge the conf.d drop-in (healthcheck is still registered)" >&2
+                        exit 1
+                      fi
+                      # The lease contract's own SSH path, as the contract user.
+                      out=$(ssh -p 2222 -i /tmp/crabbox-lease-key \
+                        -o BatchMode=yes -o StrictHostKeyChecking=no \
+                        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+                        crabbox@127.0.0.1 \
+                        'id -un && sudo -n true && echo SUDO_OK && /usr/local/libexec/crabbox/ready && echo READY_OK')
+                      printf '%s\n' "$out"
+                      printf '%s\n' "$out" | grep -qx crabbox
+                      printf '%s\n' "$out" | grep -qx SUDO_OK
+                      printf '%s\n' "$out" | grep -qx READY_OK
+                      # The perform pass's own lease work.
+                      test -f /var/lib/crabbox/bootstrapped
+                      marker=$(tr -d '\n' < /var/lib/crabbox/bootstrap-marker)
+                      test "$marker" = charly-pod-crabbox-nested-bed
+                      echo "PRESENT: inner containerd answers (server UUID above), the conf.d drop-in is effective in the running daemon, /etc/machine-id is this lease's own, and the lease holds over SSH"
+                  in_container: true
